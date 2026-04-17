@@ -1,0 +1,170 @@
+name: Build
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fetch-latest-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      should_build: ${{ steps.compare-versions.outputs.should_build }}
+    steps:
+      - name: Cache Koharu Version
+        id: cache-version
+        uses: actions/cache/restore@v5
+        with:
+          path: koharu_version
+          key: koharu-version-restore-${{ github.run_id }}
+          restore-keys: |
+            koharu-version-
+      - name: Get latest Koharu version
+        id: get-version
+        run: |
+          version=$(gh release view --repo mayocream/koharu --json tagName --jq .tagName)
+          if [ -f koharu_version ]; then
+            current_version=$(cat koharu_version)
+          else
+            current_version=""
+          fi
+          
+          echo "version=$version" >> $GITHUB_OUTPUT
+          echo "current_version=$current_version" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compare versions
+        id: compare-versions
+        run: |
+          should_build="false"
+          if [ "${{ steps.get-version.outputs.current_version }}" != "${{ steps.get-version.outputs.version }}" ]; then
+            should_build="true"
+          fi
+          if [ "$should_build" == "true" ]; then
+             echo "Koharu version is not up to date. Proceeding with build."
+             echo "${{ steps.get-version.outputs.version }}" > koharu_version
+          else
+             echo "Koharu version is up to date. Skipping further steps."
+          fi
+          echo "should_build=$should_build" >> $GITHUB_OUTPUT
+
+      - name: Save to cache
+        if: steps.compare-versions.outputs.should_build == 'true'
+        id: save-to-cache
+        uses: actions/cache/save@v5
+        with:
+          path: koharu_version
+          key: koharu-version-${{ steps.get-version.outputs.version }}
+
+  build:
+    needs: fetch-latest-version
+    if: ${{ needs.fetch-latest-version.outputs.should_build == 'true' }}
+    name: Build Ubuntu
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+      - uses: actions/checkout@v6
+        with:
+          repository: mayocream/koharu
+          path: koharu-repo
+          ref: ${{ needs.fetch-latest-version.outputs.version }}
+      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
+      - uses: Jimver/cuda-toolkit@master
+        with:
+          cuda: '13.0.0'
+          log-file-suffix: 'ubuntu-latest.txt'
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+      - run: bun install
+        working-directory: ${{github.workspace}}/koharu-repo
+      - uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/koharu-repo/ui/.next/cache
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('**/bun.lock') }}-${{ hashFiles('ui/**/*.js', 'ui/**/*.jsx', 'ui/**/*.ts', 'ui/**/*.tsx') }}
+          restore-keys: |
+            ${{ runner.os }}-nextjs-${{ hashFiles('**/bun.lock') }}-
+      - run: bun tauri build --no-bundle
+        working-directory: ${{github.workspace}}/koharu-repo
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: koharu-ubuntu
+          path: |
+            ${{github.workspace}}/koharu-repo/target/release/koharu*
+          retention-days: 3
+
+  create-and-upload-release:
+    needs: [fetch-latest-version,build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: koharu-ubuntu
+          path: ${{github.workspace}}/koharu-repo/target/release
+
+      - name: Create and upload release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.fetch-latest-version.outputs.version }}
+          name: ${{ needs.fetch-latest-version.outputs.version }}
+          files: |
+            ${{github.workspace}}/koharu-repo/target/release/koharu*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+  retain-only-latest-release:
+    needs: create-and-upload-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete releases except latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release list --limit 1000 --json tagName,isLatest --jq '.[] | select(.isLatest == false) | .tagName' | \
+          xargs -I {} gh release delete {} --yes --cleanup-tag
+
+  delete-runs:
+    needs: fetch-latest-version
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 7
+          keep_minimum_runs: 1
+          use_daily_retention: true
+          delete_workflow_pattern: Build
