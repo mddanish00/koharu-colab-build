@@ -67,7 +67,6 @@ jobs:
   build:
     needs: fetch-latest-version
     if: ${{ needs.fetch-latest-version.outputs.should_build == 'true' }}
-    name: Build Ubuntu
     runs-on: ubuntu-22.04
     steps:
       - name: Install dependencies
@@ -92,7 +91,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: Jimver/cuda-toolkit@master
         with:
-          cuda: '13.0.0'
+          cuda: '12.8.0'
           log-file-suffix: 'ubuntu-latest.txt'
       - uses: actions/cache@v5
         with:
@@ -134,7 +133,7 @@ jobs:
           tag_name: ${{ needs.fetch-latest-version.outputs.version }}
           name: ${{ needs.fetch-latest-version.outputs.version }}
           files: |
-            ${{github.workspace}}/koharu-repo/target/release/koharu*
+            ${{github.workspace}}/koharu-repo/target/release/koharu
           draft: false
           prerelease: false
           generate_release_notes: true
