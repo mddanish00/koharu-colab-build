@@ -115,8 +115,49 @@ jobs:
             ${{github.workspace}}/koharu-repo/target/release/koharu*
           retention-days: 3
 
+  build-llama-cpp:
+    needs: fetch-latest-version
+    if: ${{ needs.fetch-latest-version.outputs.should_build == 'true' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: mayocream/koharu
+          path: koharu-repo
+          ref: ${{ needs.fetch-latest-version.outputs.version }}
+      - name: Extract llama.cpp version
+        id: extract-version
+        run: |
+          TAG=$(grep 'LLAMA_CPP_TAG' koharu-repo/.cargo/config.toml | cut -d '"' -f 2)
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+      - uses: actions/checkout@v6
+        with:
+          repository: ggml-org/llama.cpp
+          path: llama-cpp
+          ref: ${{ steps.extract-version.outputs.tag }}
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential cmake libgomp1 git libssl-dev
+      - uses: Jimver/cuda-toolkit@master
+        with:
+          cuda: '13.0.0'
+          log-file-suffix: 'llama-cpp.txt'
+      - name: Build llama.cpp
+        run: |
+          cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="75"
+          cmake --build build --config Release -j $(nproc)
+        working-directory: llama-cpp
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: llama-cpp-build
+          path: |
+            llama-cpp/build
+          retention-days: 3
+
   create-and-upload-release:
-    needs: [fetch-latest-version,build]
+    needs: [fetch-latest-version,build,build-llama-cpp]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -127,13 +168,28 @@ jobs:
           name: koharu-ubuntu
           path: ${{github.workspace}}/koharu-repo/target/release
 
+      - name: Download llama-cpp artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: llama-cpp-build
+          path: ${{github.workspace}}/llama-cpp-build
+
+      - name: Zip artifacts
+        run: |
+          mkdir -p dist
+          if [ -f "${{github.workspace}}/koharu-repo/target/release/koharu" ]; then
+            cp "${{github.workspace}}/koharu-repo/target/release/koharu" dist/
+          fi
+          cp -r "${{github.workspace}}/llama-cpp-build" dist/llama-cpp-build
+          cd dist && zip -r ../koharu-colab-ubuntu.zip .
+
       - name: Create and upload release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.fetch-latest-version.outputs.version }}
           name: ${{ needs.fetch-latest-version.outputs.version }}
           files: |
-            ${{github.workspace}}/koharu-repo/target/release/koharu
+            koharu-colab-ubuntu.zip
           draft: false
           prerelease: false
           generate_release_notes: true
